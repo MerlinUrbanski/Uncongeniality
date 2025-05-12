@@ -1,1 +1,1 @@
-I upload my Thesis Draft Versions here at the end of the Day. When you are giving Feedback you can give Feedback to the newest Version available :)
+This repository contains the uncompressed Version of my Master Thesis. All code used for the study will be available after the Deadline on Monday 19th of May.
