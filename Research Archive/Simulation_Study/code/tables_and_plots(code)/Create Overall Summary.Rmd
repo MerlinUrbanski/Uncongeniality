@@ -1,0 +1,134 @@
+---
+title: "Create Final Summary"
+author: "Merlin"
+date: "2025-04-08"
+output: html_document
+---
+Load packages
+```{r}
+library(stringr)
+library(dplyr)
+library(here)
+```
+
+
+
+```{r}
+
+# Recreate sim_params if not already in your environment
+sams      <- rep(1000, 40)
+quadratic <- c(rep(TRUE, 20), rep(FALSE, 20))
+quadpred  <- c(rep(TRUE, 10), rep(FALSE, 10), rep(TRUE, 10), rep(FALSE, 10))
+cov       <- rep(c(rep(0.2, 5), rep(0.8, 5)), 4)
+missm     <- rep(c(0, 1, 2, 3, 4), 8)
+missp     <- rep(0.3, 40)
+
+sim_params <- tibble(
+  scenario_index = 1:40,
+  sams,
+  quadratic,
+  quadpred,
+  cov,
+  missm,
+  missp
+)
+
+# Define maps for recoding imputation and substantive models
+imputation_map  <- c("pmm", "ri", "rf", "ri_quadratic", "pmm_quadratic")
+substantive_map <- c("reg", "rf")
+
+# Reconstruct the grid of model combinations (as used in simulation)
+model_combinations <- expand.grid(imp = 0:4, subs = 0:1)
+
+# Helper to build the path to each results_summary folder
+results_summary_folder <- function(iter) {
+  here(
+    "results",
+    paste0("ir_iteration_", iter),
+    "results_summary"
+  )
+}
+
+# Quick check that our top‐level results/ exists
+if (!dir.exists(here("results"))) {
+  stop("Cannot find the `results/` folder at project root: ", here())
+}
+
+all_iterations <- vector("list", length = 100)
+
+for (iter in seq_len(100)) {
+  rsf <- results_summary_folder(iter)
+  if (!dir.exists(rsf)) {
+    warning("Skipping iteration ", iter, ": folder not found → ", rsf)
+    next
+  }
+
+  # Only pick files named exactly like result_scenario_<n>_model_<m>.rds
+  files <- list.files(
+    path       = rsf,
+    pattern    = "^result_scenario_\\d+_model_\\d+\\.rds$",
+    full.names = TRUE
+  )
+  if (length(files) == 0) {
+    warning("No matching .rds files in ", rsf)
+    next
+  }
+
+  iter_data <- lapply(files, function(file_path) {
+    base <- basename(file_path) %>% str_remove("\\.rds$")
+    m    <- str_match(base, "^result_scenario_(\\d+)_model_(\\d+)$")
+    if (is.na(m[1,1])) {
+      warning("Filename does not match pattern: ", base)
+      return(NULL)
+    }
+
+    scenario_index <- as.integer(m[1,2])
+    model_index    <- as.integer(m[1,3])
+
+    df <- readRDS(file_path)
+    if (is.null(df)) {
+      warning("Null data in: ", file_path)
+      return(NULL)
+    }
+
+    df <- df %>%
+      mutate(
+        iteration       = iter,
+        scenario_index  = scenario_index,
+        model_index     = model_index
+      )
+
+    # map numeric indexes to labels
+    imp_val  <- model_combinations$imp [model_index]
+    subs_val <- model_combinations$subs[model_index]
+    df %>%
+      mutate(
+        imp = imputation_map [imp_val  + 1],
+        subs = substantive_map[subs_val + 1]
+      )
+  })
+
+  # bind & merge
+  iter_tbl <- bind_rows(iter_data)
+  iter_tbl <- left_join(iter_tbl, sim_params, by = "scenario_index")
+  all_iterations[[iter]] <- iter_tbl
+}
+
+# Combine and select
+final_summary <- bind_rows(all_iterations) %>%
+  select(
+    iteration,
+    scenario_index,
+    quadratic, quadpred, cov, missm,
+    imp, subs,
+    MSE, R2,
+    Calibration_Intercept,
+    Calibration_Slope
+  )
+
+# Save the final summary to files (RDS and CSV, if needed)
+saveRDS(final_summary, file = "final_summary_all_iterations.rds")
+
+
+```
+

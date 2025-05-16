@@ -1,0 +1,179 @@
+---
+title: "Spaghetti Plots"
+author: "Merlin"
+date: "2025-04-11"
+output: html_document
+---
+
+Load packages
+```{r}
+library(here)
+library(purrr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(tidyverse)
+library(patchwork)
+library(grid)
+```
+
+
+Function to create spaghetti plots
+```{r}
+# Function to build calibration plots
+create_calibration_plots <- function(scenarios = 1:5,
+                                     iterations = 1:100,
+                                     results_dir = here::here("results")) {
+  # Fixed settings
+  models <- 1:10
+  bottom_model <- 7
+  new_order <- c("model1", "model3", "model5", "model4", "model2", 
+                 "model6", "model8", "model10", "model9", "model7")
+  model_labels <- c("PMM + REG", "PMM-Q + REG", "RI + REG", "RI-Q + REG", "RF + REG",
+                    "PMM + RF", "PMM-Q + RF", "RI + RF", "RI-Q + RF", "RF + RF")
+  
+  # Scenario labels
+  if (length(scenarios) == 5) {
+    scenario_labels <- c("MCAR", "Weak MAR", "Strong MAR", "Weak MNAR", "Strong MNAR")
+  } else {
+    scenario_labels <- paste("Scenario", scenarios)
+  }
+  
+  # Check top-level results folder
+  if (!dir.exists(results_dir)) {
+    stop("Cannot find the `results` directory at: ", results_dir)
+  }
+
+  # Read calibration data
+  calib_data_dict <- list()
+  global_data_list <- list()
+  
+  for (mod in models) {
+    for (sc in scenarios) {
+      file_list <- map(iterations, function(i) {
+        file_path <- file.path(results_dir,
+                               paste0("ir_iteration_", i),
+                               "calibration_data",
+                               paste0("calibration_scenario_", sc, "_model_", mod, ".rds"))
+        if (!file.exists(file_path)) {
+          warning("File not found: ", file_path)
+          return(NULL)
+        }
+        readRDS(file_path) %>% mutate(iteration = i)
+      }) %>% compact()
+      if (length(file_list) == 0) next
+      calibration_data <- bind_rows(file_list)
+      key <- paste0("model", mod, "_scenario_", sc)
+      calib_data_dict[[key]] <- calibration_data
+      global_data_list[[key]] <- calibration_data
+    }
+  }
+  
+  if (length(global_data_list) == 0) {
+    stop("No calibration data found for the selected scenarios and iterations.")
+  }
+  
+  # Compute global axis limits
+  all_data <- bind_rows(global_data_list)
+  global_min <- min(c(all_data$predicted, all_data$loess_smoothed), na.rm = TRUE)
+  global_max <- max(c(all_data$predicted, all_data$loess_smoothed), na.rm = TRUE)
+  message("Global axis limits: [", global_min, ", ", global_max, "]")
+  
+  # Build plots list
+  plots_list <- list()
+  for (mod in models) {
+    for (sc in scenarios) {
+      key <- paste0("model", mod, "_scenario_", sc)
+      df <- calib_data_dict[[key]]
+      if (is.null(df)) next
+      p <- ggplot(df, aes(x = predicted, y = loess_smoothed, group = iteration)) +
+        geom_line(alpha = 0.2, color = "#101011", linewidth = 0.5) +
+        geom_abline(slope = 1, intercept = 0, color = "gray", linetype = "dashed") +
+        scale_x_continuous(limits = c(global_min, global_max)) +
+        scale_y_continuous(limits = c(global_min, global_max)) +
+        labs(x = NULL, y = NULL) +
+        theme_minimal() +
+        theme(axis.text = element_blank(), axis.ticks = element_blank(),
+              plot.margin = unit(c(2,2,2,2), "pt"))
+      if (sc == min(scenarios)) {
+        p <- p + theme(axis.text.y = element_text(size = 7, color = 'black'))
+      }
+      if (mod == bottom_model) {
+        p <- p + theme(axis.text.x = element_text(size = 7, color = 'black'))
+      }
+      plots_list[[key]] <- p
+    }
+  }
+  
+  # Assemble rows and add right-side labels
+  rows_list <- map(models, function(mod) {
+    row_plots <- map(scenarios, function(sc) plots_list[[paste0('model',mod,'_scenario_',sc)]]) %>% compact()
+    wrap_plots(row_plots, nrow = 1)
+  })
+  names(rows_list) <- paste0('model', models)
+  rows_list <- rows_list[new_order]
+  right_labeled_rows <- map2(rows_list, model_labels, ~ wrap_plots(list(.x, ggplot() + theme_void() +
+                                    annotate('text', x=0.5,y=0.5,label=.y,angle=270,size=4.2,fontface='bold')), nrow=1, widths=c(1,0.07)))
+  main_grid <- wrap_plots(right_labeled_rows, ncol = 1)
+  
+  # Top headers
+  header_plots <- map(scenario_labels, function(lab) ggplot() + theme_void() +
+                       annotate('text', x=0.5,y=0.5,label=lab,hjust=0.5,vjust=0.5,size=5.5,fontface='bold'))
+  top_row <- wrap_plots(c(header_plots, list(plot_spacer())), nrow=1,
+                        widths = c(rep(1, length(header_plots)), 0.2))
+  
+  # Bottom x-axis
+  x_label_plot <- ggplot() + theme_void() +
+    annotate('text', x=0.5,y=0.5,label='Predicted Values',size=6,fontface='bold')
+  bottom_row <- wrap_plots(list(x_label_plot, plot_spacer()), nrow=1, widths=c(1,0.07))
+  
+  # Left outer label
+  left_label_plot <- ggplot() + theme_void() +
+    annotate('text', x=0.5,y=0.5,label='Observed Values',angle=90,size=6,fontface='bold')
+  
+  # Combine everything
+  rest_layout <- top_row / main_grid / bottom_row + plot_layout(heights=c(0.05,1,0.05))
+  
+  final_figure <- (left_label_plot | rest_layout) + plot_layout(widths=c(0.04,1))
+  
+  return(final_figure)
+}
+
+```
+
+Create all plots for the Appendix
+```{r}
+# this will point to
+# …/Simulation_Study/calibration(spaghetti)-plots/appendix
+output_dir <- here("calibration(spaghetti)-plots", "appendix")
+
+# 2) Define the 8 scenario-ranges you want
+scenario_ranges <- list(
+  1:5,   6:10,  11:15, 16:20,
+  21:25, 26:30, 31:35, 36:40
+)
+
+# 3) Loop over each block, build + save + print
+for (rng in scenario_ranges) {
+  start <- min(rng); end <- max(rng)
+  plt  <- create_calibration_plots(
+    scenarios = rng,
+    iterations = 1:100
+  )
+  
+  filename <- sprintf("plots%02d_%02d.png", start, end)
+  ggsave(
+    filename = file.path(output_dir, filename),
+    plot     = plt,
+    width    = 12,
+    height   = 15,
+    dpi      = 500
+  )
+  
+  print(plt)
+}
+```
+
+
+```
+

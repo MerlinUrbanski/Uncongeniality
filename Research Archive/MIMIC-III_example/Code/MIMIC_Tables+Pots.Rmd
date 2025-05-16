@@ -1,0 +1,140 @@
+---
+title: "MIMIC_Analysis"
+author: "Merlin"
+date: "2025-05-04"
+output: html_document
+---
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+library(patchwork)
+```
+
+Create Table
+```{r}
+results_dir <- "../results"
+
+files <- list.files(
+  path       = results_dir,
+  pattern    = "^res_imp\\d+_subs\\d+\\.rds$",
+  full.names = TRUE
+)
+
+applied_perf <- map_dfr(files, function(fpath) {
+  res  <- readRDS(fpath)
+  info <- str_match(basename(fpath), "^res_imp(\\d+)_subs(\\d+)\\.rds$")
+  imp  <- as.integer(info[2])
+  subs <- as.integer(info[3])
+  tibble(
+    imp  = imp,
+    subs = subs,
+    RMSE = res$Results_DataFrame$RMSE,
+    R2   = res$Results_DataFrame$R2
+  )
+})
+
+summary_table <- applied_perf %>%
+  mutate(
+    imputation = case_when(
+      imp == 0 ~ "PMM",
+      imp == 1 ~ "Quadratic (RI)",
+      imp == 2 ~ "Norm-Predict (RI)",
+      imp == 3 ~ "Norm-Predict + Squares",
+      imp == 4 ~ "Random Forest"
+    ) %>%
+      factor(levels = c(
+        "PMM",
+        "Quadratic (RI)",
+        "Norm-Predict (RI)",
+        "Norm-Predict + Squares",
+        "Random Forest"
+      )),
+    substantive = if_else(subs == 0, "Linear Model", "Random Forest")
+  ) %>%
+  dplyr::select(imputation, substantive, RMSE, R2) %>%
+  arrange(substantive, imputation)
+
+#round values inside the table to 3 decimals 
+summary_table <- summary_table %>%
+  mutate(
+    RMSE = round(RMSE, 3),
+    R2   = round(R2, 3)
+  )
+
+print(summary_table)
+
+```
+
+Calibration Plot for single imputation lines. 
+```{r}
+# 1. List all result files
+files <- list.files("../results",
+                    pattern = "^res_imp\\d_subs\\d\\.rds$",
+                    full.names = TRUE)
+
+# 2. Parse imp/subs codes & labels
+imp_labels  <- c("PMM", "PMM-Q", "RI", "RI-Q", "RF")
+subs_labels <- c("Linear Model", "Random Forest")
+
+meta <- data.frame(path = files, stringsAsFactors = FALSE)
+codes <- lapply(basename(files), function(fn) {
+  m     <- regexec("res_imp(\\d)_subs(\\d)\\.rds", fn)
+  parts <- regmatches(fn, m)[[1]]
+  list(imp  = as.integer(parts[2]),
+       subs = as.integer(parts[3]))
+})
+meta$imp  <- sapply(codes, `[[`, "imp")
+meta$subs <- sapply(codes, `[[`, "subs")
+meta$imp_lab  <- imp_labels[meta$imp + 1]
+meta$subs_lab <- subs_labels[meta$subs + 1]
+
+# 3. Read calibration data and combine
+calib_list <- lapply(seq_len(nrow(meta)), function(i) {
+  df <- readRDS(meta$path[i])$Calibration_Data
+  df$imp_lab  <- meta$imp_lab[i]
+  df$subs_lab <- meta$subs_lab[i]
+  df
+})
+all_calib <- bind_rows(calib_list)
+
+# 4. Fixed x/y limits from -15 to 90
+xlims <- c(-15, 90)
+ylims <- c(-15, 90)
+
+# Ensure correct facet ordering
+action_levels <- c("Linear Model", "Random Forest")
+model_levels  <- imp_labels
+all_calib$subs_lab <- factor(all_calib$subs_lab, levels = action_levels)
+all_calib$imp_lab  <- factor(all_calib$imp_lab,  levels = model_levels)
+
+# 5. Plot with facets: columns by imputation model, rows by substantive model Plot with facets: columns by imputation model, rows by substantive model
+p <- ggplot(all_calib, aes(x = predicted, y = loess_smoothed)) +
+  geom_line(size = 0.8) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_x_continuous("Observed BUN", limits = xlims, expand = c(0, 0)) +
+  scale_y_continuous("Predicted BUN", limits = ylims, expand = c(0, 0)) +
+  facet_grid(subs_lab ~ imp_lab) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    strip.background = element_blank(),
+    strip.placement  = "outside",
+    panel.spacing    = unit(0.5, "lines"),
+    axis.title       = element_text(size = 14),
+    strip.text       = element_text(size = 14, face = "bold")
+  )
+
+# 6. Display (optionally save) with white background
+print(p)
+
+ggsave("../plots/calibration_grid.png", p, width = 16, height = 6)
+
+```
+

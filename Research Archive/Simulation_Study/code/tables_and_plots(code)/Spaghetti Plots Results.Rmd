@@ -1,0 +1,279 @@
+---
+title: "Spaghetti Plots Results"
+author: "Merlin"
+date: "2025-04-13"
+output: html_document
+---
+Packages
+```{r}
+library(here)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(patchwork)
+library(grid)  # for unit()
+
+```
+
+Function to create the calibration plots of my results section.
+```{r}
+create_calibration_plots_res <- function(
+  scenarios = 1:4,
+  iterations = 1:100,
+  results_dir = here("results"),        # ← here() points to your project root/results
+  custom_header_labels
+) {
+  # Fixed settings
+  models <- 1:10
+  bottom_model <- 7
+  new_order <- c("model1", "model3", "model5", "model4", "model2", 
+                 "model6", "model8", "model10", "model9", "model7")
+  model_labels <- c("PMM + REG", "PMM-Q + REG", "RI + REG", "RI-Q + REG", "RF + REG",
+                    "PMM + RF", "PMM-Q + RF", "RI + RF", "RI-Q + RF", "RF + RF")
+  
+  # Scenario labels
+  if (length(scenarios) == 4 && all(sort(scenarios) == 1:4)) {
+    scenario_labels <- c("MCAR", "Weak MAR", "Strong MAR", "Weak MNAR")
+  } else {
+    scenario_labels <- paste("Scenario", scenarios)
+  }
+  
+  #-----------------------------------------------------------------------------
+  # 1) READ CALIBRATION DATA
+  #-----------------------------------------------------------------------------
+  calib_data_dict <- list()
+  global_data_list <- list()
+  
+  for (mod in models) {
+    for (sc in scenarios) {
+      file_list <- purrr::map(iterations, function(i) {
+        file_path <- file.path(results_dir,
+                               paste0("ir_iteration_", i),
+                               "calibration_data",
+                               paste0("calibration_scenario_", sc, "_model_", mod, ".rds"))
+        if (!file.exists(file_path)) {
+          warning("File not found: ", file_path)
+          return(NULL)
+        }
+        calib_df <- readRDS(file_path)
+        calib_df <- dplyr::mutate(calib_df, iteration = i)
+        return(calib_df)
+      })
+      file_list <- file_list[!sapply(file_list, is.null)]
+      if (length(file_list) == 0) next
+      
+      calibration_data <- dplyr::bind_rows(file_list)
+      key <- paste0("model", mod, "_scenario_", sc)
+      calib_data_dict[[key]] <- calibration_data
+      global_data_list[[key]] <- calibration_data
+    }
+  }
+  
+  if (length(global_data_list) == 0) {
+    stop("No calibration data found for the selected scenarios and iterations.")
+  }
+  
+  #-----------------------------------------------------------------------------
+  # 2) COMPUTE SCENARIO-SPECIFIC AXIS LIMITS
+  #-----------------------------------------------------------------------------
+  scenario_limits <- list()
+  for (sc in scenarios) {
+    # Gather all data for this scenario across models
+    scenario_df_list <- lapply(models, function(m) {
+      key <- paste0("model", m, "_scenario_", sc)
+      if (!key %in% names(calib_data_dict)) return(NULL)
+      calib_data_dict[[key]]
+    })
+    scenario_df_list <- scenario_df_list[!sapply(scenario_df_list, is.null)]
+    # If no data for this scenario, skip it
+    if (length(scenario_df_list) == 0) {
+      scenario_limits[[as.character(sc)]] <- c(NA, NA)
+      next
+    }
+    scenario_data <- dplyr::bind_rows(scenario_df_list)
+    sc_min <- min(c(scenario_data$predicted, scenario_data$loess_smoothed), na.rm = TRUE)
+    sc_max <- max(c(scenario_data$predicted, scenario_data$loess_smoothed), na.rm = TRUE)
+    scenario_limits[[as.character(sc)]] <- c(sc_min, sc_max)
+  }
+  
+  #-----------------------------------------------------------------------------
+  # 3) BUILD SUBPLOTS FOR EACH MODEL-SCENARIO COMBINATION
+  #-----------------------------------------------------------------------------
+  plots_list <- list()
+  for (mod in models) {
+    for (sc in scenarios) {
+      key <- paste0("model", mod, "_scenario_", sc)
+      if (!key %in% names(calib_data_dict)) next
+      
+      df <- calib_data_dict[[key]]
+      # Use scenario-specific min and max for the x and y axis
+      limits <- scenario_limits[[as.character(sc)]]
+      
+      p <- ggplot2::ggplot(df, ggplot2::aes(x = predicted, y = loess_smoothed, group = iteration)) +
+        ggplot2::geom_line(alpha = 0.2, color = "#101011", linewidth = 0.5) +
+        ggplot2::geom_abline(slope = 1, intercept = 0, color = "gray", linetype = "dashed") +
+        ggplot2::scale_x_continuous(limits = limits) +
+        ggplot2::scale_y_continuous(limits = limits) +
+        ggplot2::labs(x = NULL, y = NULL) +
+        ggplot2::theme_minimal() +
+        ggplot2::theme(
+          axis.text  = ggplot2::element_blank(),
+          axis.ticks = ggplot2::element_blank(),
+          plot.margin = grid::unit(c(2, 2, 2, 2), "pt")
+        )
+      
+      # Show y-axis ticks and labels in the leftmost column only
+      if (sc == min(scenarios)) {
+        p <- p + ggplot2::theme(axis.text.y = ggplot2::element_text(size = 7, color = "black"))
+      }
+      
+      plots_list[[key]] <- p
+    }
+  }
+  
+  #-----------------------------------------------------------------------------
+  # 4) ASSEMBLE ROWS (ONE PER MODEL, each having the selected scenarios)
+  #-----------------------------------------------------------------------------
+  rows_list <- list()
+  for (mod in models) {
+    row_plots <- list()
+    for (sc in scenarios) {
+      key <- paste0("model", mod, "_scenario_", sc)
+      if (key %in% names(plots_list)) {
+        p <- plots_list[[key]]
+        # For the bottom model row, add x-axis tick labels
+        if (mod == bottom_model) {
+          p <- p + ggplot2::theme(axis.text.x = ggplot2::element_text(size = 7, color = "black"))
+        }
+        row_plots[[as.character(sc)]] <- p
+      }
+    }
+    rows_list[[paste0("model", mod)]] <- patchwork::wrap_plots(row_plots, nrow = 1)
+  }
+  
+  # Reorder the rows based on new_order
+  rows_list <- rows_list[new_order]
+  
+  #-----------------------------------------------------------------------------
+  # 5) ADD MODEL LABELS ON THE RIGHT (ROTATED)
+  #-----------------------------------------------------------------------------
+  right_labeled_rows <- purrr::map2(rows_list, model_labels, function(row_plot, lab) {
+    label_plot <- ggplot2::ggplot() +
+      ggplot2::xlim(0, 1) + ggplot2::ylim(0, 1) +
+      ggplot2::theme_void() +
+      ggplot2::annotate("text", x = 0.5, y = 0.5, 
+                        label = lab, angle = 270,
+                        size = 4.5, fontface = "bold")
+    patchwork::wrap_plots(list(main = row_plot, label = label_plot), nrow = 1, widths = c(1, 0.07))
+  })
+  
+  main_grid <- patchwork::wrap_plots(right_labeled_rows, ncol = 1)
+  
+  #-----------------------------------------------------------------------------
+  # 6) COLUMN HEADERS (TOP) AND BOTTOM X-AXIS LABEL
+  #-----------------------------------------------------------------------------
+  header_plots <- purrr::map(custom_header_labels, function(lab) {
+    ggplot2::ggplot() +
+      ggplot2::xlim(0, 1) + 
+      ggplot2::ylim(0, 1) +
+      ggplot2::theme_void() +
+      ggplot2::theme(plot.margin = grid::unit(c(0, 0, 0, 0), "pt")) +
+      ggplot2::annotate("text", 
+                        x = 0.5, y = 0.5, 
+                        label = lab, 
+                        hjust = 0.5,     # center the text horizontally
+                        vjust = 0.5,     # center the text vertically
+                        size = 4.2,        # increased from 3 to 5
+                        fontface = "bold")
+  })
+  
+  blank_left  <- ggplot2::ggplot() + ggplot2::theme_void()
+  blank_right <- ggplot2::ggplot() + ggplot2::theme_void()
+  
+  top_row <- patchwork::wrap_plots(
+    c(list(blank_left), header_plots, list(blank_right)), 
+    nrow = 1,
+    widths = c(0.05, rep(0.7, length(header_plots)), 0.2)
+  )
+  
+  x_label_plot <- ggplot2::ggplot() +
+    ggplot2::xlim(0,1) + ggplot2::ylim(0,1) +
+    ggplot2::theme_void() +
+    ggplot2::annotate("text", x = 0.5, y = 0.5, 
+                      label = "Predicted Values", size = 6, fontface = "bold")
+  bottom_blank <- ggplot2::ggplot() + ggplot2::theme_void()
+  
+  bottom_row <- patchwork::wrap_plots(list(x_label_plot, bottom_blank), 
+                                      nrow = 1,
+                                      widths = c(1, 0.07))
+  
+  #-----------------------------------------------------------------------------
+  # 7) LEFT-OUTER LABEL ("Observed Values")
+  #-----------------------------------------------------------------------------
+  left_label_plot <- ggplot2::ggplot() +
+    ggplot2::xlim(0,1) + ggplot2::ylim(0,1) +
+    ggplot2::theme_void() +
+    ggplot2::annotate("text", x = 0.5, y = 0.5, 
+                      label = "Observed Values", angle = 90, 
+                      size = 6, fontface = "bold")
+  
+  # Combine [top row / main grid / bottom row] and add left label
+  rest_layout <- top_row / main_grid / bottom_row +
+    patchwork::plot_layout(heights = c(0.05, 1, 0.05))
+  
+  final_figure <- (left_label_plot | rest_layout) +
+    patchwork::plot_layout(widths = c(0.04, 1))
+  
+  return(final_figure)
+}
+
+```
+
+Create Plots for the Result section (Figure 4 and 5)
+```{r}
+output_dir <- here("calibration(spaghetti)-plots", "results")
+
+# scenarios 1,6,11,16
+plots1_6_11_16 <- create_calibration_plots_res(
+  scenarios = c(1, 6, 11, 16),
+  iterations = 1:100,
+  results_dir = here("results"),
+  custom_header_labels = c(
+    "RL-Out: Quadratic\nRL-Pred: Quadratic\nCor-Pred: Low",
+    "RL-Out: Quadratic\nRL-Pred: Quadratic\nCor-Pred: High",
+    "RL-Out: Quadratic\nRL-Pred: Linear\nCor-Pred: Low",
+    "RL-Out: Quadratic\nRL-Pred: Linear\nCor-Pred: High"
+  )
+)
+
+ggsave(
+  filename = file.path(output_dir, "plots1_6_11_16.png"),
+  plot     = plots1_6_11_16,
+  width    = 12,
+  height   = 15,
+  dpi      = 500
+)
+
+# scenarios 21,26,31,36
+plots21_26_31_36 <- create_calibration_plots_res(
+  scenarios = c(21, 26, 31, 36),
+  iterations = 1:100,
+  results_dir = here("results"),
+  custom_header_labels = c(
+    "RL-Out: Linear\nRL-Pred: Quadratic\nCor-Pred: Low",
+    "RL-Out: Linear\nRL-Pred: Quadratic\nCor-Pred: High",
+    "RL-Out: Linear\nRL-Pred: Linear\nCor-Pred: Low",
+    "RL-Out: Linear\nRL-Pred: Linear\nCor-Pred: High"
+  )
+)
+
+ggsave(
+  filename = file.path(output_dir, "plots21_26_31_36.png"),
+  plot     = plots21_26_31_36,
+  width    = 12,
+  height   = 15,
+  dpi      = 500
+)
+```
+
+

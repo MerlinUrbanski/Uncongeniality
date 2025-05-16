@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+.RDataTmp
+.Ruserdata
+.gitattributes
+/Research Archive/MIMIC-III_example/data/LABEVENTS.csv
+/Research Archive/Simulation_Study/results

@@ -1,0 +1,367 @@
+---
+title: "Tables"
+author: "Merlin"
+date: "2025-04-08"
+output: html_document
+---
+# In case you did not load the data yet
+```{r}
+#read in final_summary_all_iterations.rds
+final_summary <- readRDS("final_summary_all_iterations.rds")
+```
+
+# Load libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+library(tidyverse)
+library(xtable)
+library(tibble)
+```
+
+## Pre-processing the data
+```{r}
+# Transform MSE to RMSE for each observation
+final_summary <- final_summary %>%
+  mutate(RMSE = sqrt(MSE))
+
+# Aggregate the metrics (using RMSE instead of MSE)
+agg_metrics <- final_summary %>%
+  group_by(scenario_index, imp, subs) %>%
+  summarise(
+    mean_RMSE = mean(RMSE, na.rm = TRUE),
+    sd_RMSE   = sd(RMSE, na.rm = TRUE),
+    mean_R2   = mean(R2, na.rm = TRUE),
+    sd_R2     = sd(R2, na.rm = TRUE),
+    .groups   = "drop"
+  )
+
+# Convert to long format to facilitate pivoting wide.
+agg_long <- agg_metrics %>%
+  pivot_longer(
+    cols = c(mean_RMSE, sd_RMSE, mean_R2, sd_R2),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  # Create a variable to identify each model combination.
+  mutate(model_combo = paste0(imp, "_", subs))
+
+# Pivot to wide format, so that each model combination's metric becomes a separate column.
+final_aggregated <- agg_long %>%
+  select(scenario_index, model_combo, metric, value) %>%
+  pivot_wider(
+    names_from = c(model_combo, metric),
+    values_from = value
+  ) %>%
+  arrange(scenario_index)
+
+#round all values to three decimals
+final_aggregated <- final_aggregated %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+```
+
+#Result section 
+
+##Overall ranked table (Table 9 in the report)
+```{r}
+#within each iteration, scenario, and subs, rank the models based on RMSE and once on R2
+ranked_data <- final_summary %>%
+  group_by(iteration, scenario_index, subs) %>%
+  mutate(
+    rank_rmse = rank(RMSE, ties.method = "min"),
+    rank_r2   = rank(-R2, ties.method = "min") # Negative sign to rank higher R2 values better
+  ) 
+  
+
+#compute the mean rank for each model combinations across all iterations and scenarios 
+rank_summary <- ranked_data %>%
+  group_by(imp, subs) %>%
+  summarise(
+    mean_rank_rmse = mean(rank_rmse, na.rm = TRUE),
+    sd_rank_rmse   = sd(rank_rmse, na.rm = TRUE),
+    mean_rank_r2   = mean(rank_r2, na.rm = TRUE),
+    sd_rank_r2     = sd(rank_r2, na.rm = TRUE),
+    .groups = "drop"
+  ) 
+
+#adjust the order of the table (for subs: first all reg models, then all rf models and with; for imp: first pmm, then pmm_quadratic, then ri, then ri_quadratic, and finally rf) and round all values to three decimals
+
+rank_summary <- rank_summary %>%
+  mutate(
+    subs = factor(subs, levels = c("reg", "rf")),
+    imp  = factor(imp, levels = c("pmm", "pmm_quadratic", "ri", "ri_quadratic", "rf"))
+  ) %>%
+  arrange(subs, imp) %>%  # Order rows by subs first, then by imp
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+#convert to latex table with kable
+rank_table <- kable(
+  rank_summary, 
+  format = "latex", 
+  booktabs = TRUE, 
+  row.names = FALSE
+)
+
+cat(rank_table)
+
+```
+
+
+
+##4 subtables with RMSE and R-squared (Table 5 - 8 in the report)
+```{r}
+# Create an empty list to store the 4 tables
+table_list <- list()
+
+# Define the levels (as character vectors) for imputation and prediction models.
+expected_imp <- c("PMM", "PMM-Q", "RI", "RI-Q", "RF")
+expected_subs <- c("REG", "RF")
+
+# Define the levels for quadratic and quadpred (2 x 2 = 4 tables)
+quad_levels <- c(FALSE, TRUE)
+quadpred_levels <- c(FALSE, TRUE)
+
+for(q in quad_levels) {
+  for(qp in quadpred_levels) {
+    
+    # Filter for the given combination, and convert imp and subs to character.
+    subset_df <- final_summary %>%
+      filter(quadratic == q, quadpred == qp) %>%
+      filter(!is.na(imp) & !is.na(subs)) %>%
+      mutate(
+        imp = as.character(imp),
+        subs = as.character(subs),
+        RMSE = sqrt(MSE)
+      ) %>%
+      group_by(imp, subs, cov) %>%
+      summarise(
+        mean_RMSE = mean(RMSE, na.rm = TRUE),
+        sd_RMSE   = sd(RMSE, na.rm = TRUE),
+        mean_R2   = mean(R2, na.rm = TRUE),
+        sd_R2     = sd(R2, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    # Pivot the data so that metrics for cov = 0.2 and 0.8 become separate columns.
+    table_wide <- subset_df %>%
+      pivot_wider(
+        id_cols = c(imp, subs),
+        names_from = cov,
+        values_from = c(mean_RMSE, sd_RMSE, mean_R2, sd_R2),
+        names_glue = "{.value}_{cov}"
+      ) %>%
+      # Round numeric values to three decimals
+      mutate(across(where(is.numeric), ~ round(., 3))) 
+    
+    
+    table_wide <- table_wide %>%
+      # Rename columns for clarity (low: cov = 0.2; high: cov = 0.8)
+      rename(
+        rmse_low     = mean_RMSE_0.2,
+        sd_rmse_low  = sd_RMSE_0.2,
+        r2_low       = mean_R2_0.2,
+        sd_r2_low    = sd_R2_0.2,
+        rmse_high    = mean_RMSE_0.8,
+        sd_rmse_high = sd_RMSE_0.8,
+        r2_high      = mean_R2_0.8,
+        sd_r2_high   = sd_R2_0.8
+      ) 
+    
+    
+    # Create a descriptive name for the table and save it in the list.
+    name <- paste0("quad=", q, "_quadpred=", qp)
+    table_list[[name]] <- table_wide
+  }
+}
+
+#Reorder tables
+
+table_list <- lapply(table_list, function(df) {
+  df %>%
+    mutate(
+      # Define the desired order for the prediction models (subs) and imputation methods (imp)
+      subs = factor(subs, levels = c("reg", "rf")),
+      imp  = factor(imp, levels = c("pmm", "pmm_quadratic", "ri", "ri_quadratic", "rf"))
+    ) %>%
+    arrange(subs, imp) %>%  # Order rows by subs first, then by imp
+    # Optionally, convert factors back to characters
+    mutate(
+      subs = as.character(subs),
+      imp  = as.character(imp)
+    )
+})
+
+# To print each reordered table:
+for(name in names(table_list)) {
+  cat("\nTable:", name, "\n")
+  print(table_list[[name]])
+}
+
+```
+
+#Appendix Tables
+
+### Helper table to explain scenarios (Table 11)
+```{r}
+helpscenario <- data.frame(
+  "Scenario Index" = 1:40,
+  "Relationship-Type Between Outcome" = c(rep("Quadratic", 20), rep("Linear", 20)),
+  "Relationship-Type Among Predictors" = c(rep("Quadratic", 10),
+                                             rep("Linear", 10),
+                                             rep("Quadratic", 10),
+                                             rep("Linear", 10)),
+  "Relationship-Strength Among Predictors" = rep(c(rep("Low", 5), rep("High", 5)), 4),
+  "Missing Mechanism" = rep(c("MCAR", "Weak MAR", "Strong MAR", "Weak MNAR", "Strong MNAR"), 8),
+  check.names = FALSE  # Keeps column names as provided
+)
+
+#latex_table <- xtable(helpscenario)
+#print(latex_table, type = "latex", include.rownames = FALSE, comment = FALSE)
+
+```
+
+
+## Function for Appendix tables (tables 12 - 15)
+```{r}
+subtable <- function(agg, met = "RMSE", pred = "reg") {
+ 
+  
+  # Filter for the desired prediction model
+  sub_agg <- agg %>%
+    filter(subs == pred) %>%
+    select(scenario_index, imp,
+           !!sym(paste0("mean_", met)),
+           !!sym(paste0("sd_", met)))
+  
+  # Pivot to wide format.
+  # This creates columns like "pmm_mean_RMSE" etc. using the recoded 'imp' values.
+  wide <- sub_agg %>%
+    pivot_wider(
+      names_from = imp,
+      values_from = c(!!sym(paste0("mean_", met)), !!sym(paste0("sd_", met))),
+      names_glue = "{imp}_{.value}"
+    ) %>%
+    arrange(scenario_index)
+  
+  # Desired column order:
+  # pmm, then pmm_quadratic (i.e., pmm‑q), then ri, then ri_quadratic (i.e., ri‑q), then rf.
+  desired_order <- c("scenario_index",
+                     paste0("pmm_mean_", met), paste0("pmm_sd_", met),
+                     paste0("pmm_quadratic_mean_", met), paste0("pmm_quadratic_sd_", met),
+                     paste0("ri_mean_", met), paste0("ri_sd_", met),
+                     paste0("ri_quadratic_mean_", met), paste0("ri_quadratic_sd_", met),
+                     paste0("rf_mean_", met), paste0("rf_sd_", met))
+  
+  # Reorder and round numeric values
+  wide <- wide %>%
+    select(all_of(desired_order)) %>%
+    mutate(across(where(is.numeric), ~ round(., 3)))
+  
+  return(wide)
+}
+
+```
+
+###RMSE and Reg (table 12)
+```{r}
+reg_rmse_table <- subtable(agg_metrics, met = "RMSE", pred = "reg")
+
+# Make sure the scenario_index column is an integer
+reg_rmse_table <- reg_rmse_table %>%
+  mutate(scenario_index = as.integer(scenario_index))
+
+# Format all columns except scenario_index to show exactly three decimals
+# (This converts them to character strings with trailing zeros)
+reg_rmse_table[-1] <- lapply(reg_rmse_table[-1], function(x)
+  formatC(round(as.numeric(x), 3), format = "f", digits = 3))
+
+# Suppose 'reg_rmse_table' is your data frame
+my_latex_code <- kable(
+  reg_rmse_table, 
+  format = "latex", 
+  booktabs = TRUE, 
+  row.names = FALSE
+)
+
+# Show raw LaTeX code in the console:
+cat(my_latex_code)
+```
+
+###RMSE and RF (table 13)
+```{r}
+rf_rmse_table <- subtable(agg_metrics, met = "RMSE", pred = "rf")
+
+# Make sure the scenario_index column is an integer
+rf_rmse_table <- rf_rmse_table %>%
+  mutate(scenario_index = as.integer(scenario_index))
+
+# Format all columns except scenario_index to show exactly three decimals
+# (This converts them to character strings with trailing zeros)
+rf_rmse_table[-1] <- lapply(rf_rmse_table[-1], function(x)
+  formatC(round(as.numeric(x), 3), format = "f", digits = 3))
+
+# Suppose 'reg_rmse_table' is your data frame
+my_latex_code <- kable(
+  rf_rmse_table, 
+  format = "latex", 
+  booktabs = TRUE, 
+  row.names = FALSE
+)
+
+# Show raw LaTeX code in the console:
+cat(my_latex_code)
+```
+
+###R2 and Reg (table 14)
+```{r}
+reg_r2_table <- subtable(agg_metrics, met = "R2", pred = "reg")
+
+# Make sure the scenario_index column is an integer
+reg_r2_table <- reg_r2_table %>%
+  mutate(scenario_index = as.integer(scenario_index))
+
+# Format all columns except scenario_index to show exactly three decimals
+# (This converts them to character strings with trailing zeros)
+reg_r2_table[-1] <- lapply(reg_r2_table[-1], function(x)
+  formatC(round(as.numeric(x), 3), format = "f", digits = 3))
+
+# Suppose 'reg_rmse_table' is your data frame
+my_latex_code <- kable(
+  reg_r2_table, 
+  format = "latex", 
+  booktabs = TRUE, 
+  row.names = FALSE
+)
+
+# Show raw LaTeX code in the console:
+cat(my_latex_code)
+```
+
+###R2 and RF (table 15)
+```{r}
+rf_r2_table <- subtable(agg_metrics, met = "R2", pred = "rf")
+# Make sure the scenario_index column is an integer
+rf_r2_table <- rf_r2_table %>%
+  mutate(scenario_index = as.integer(scenario_index))
+# Format all columns except scenario_index to show exactly three decimals
+# (This converts them to character strings with trailing zeros)
+rf_r2_table[-1] <- lapply(rf_r2_table[-1], function(x)
+  formatC(round(as.numeric(x), 3), format = "f", digits = 3))
+# Suppose 'reg_rmse_table' is your data frame
+my_latex_code <- kable(
+  rf_r2_table, 
+  format = "latex", 
+  booktabs = TRUE, 
+  row.names = FALSE
+)
+
+# Show raw LaTeX code in the console:
+cat(my_latex_code)
+```
+
+
+
+
+

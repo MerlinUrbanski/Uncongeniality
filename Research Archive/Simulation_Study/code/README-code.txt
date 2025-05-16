@@ -1,0 +1,1 @@
+The simulations folder contains the code that it necessary to reproduce the "raw" results. The tables and plots folder all code to reproduce tables and figures.
