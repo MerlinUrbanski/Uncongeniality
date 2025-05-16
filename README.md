@@ -1,1 +1,1 @@
-This repository contains the uncompressed Version of my Master Thesis. All code used for the study will be available after the Deadline on Monday 19th of May.
+This repository contains the uncompressed Version of my Master Thesis and all code that is necessary to reproduce the findings in the "Research Archive".
